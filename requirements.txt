@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+langchain-groq
+aiofiles
+elasticsearch>=8.0.0,<9.0.0
+PyPDF2
+python-docx
+sentence-transformers
+torch
+

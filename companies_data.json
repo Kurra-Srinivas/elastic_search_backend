@@ -1,0 +1,105 @@
+{
+  "companies": [
+    {
+      "id": "comp_001",
+      "name": "TechFlow Solutions",
+      "industry": "SaaS",
+      "description": "Enterprise workflow automation platform",
+      "founded": "2020",
+      "location": "San Francisco, CA",
+      "website": "https://techflow.com",
+      "linkedin_url": "https://linkedin.com/company/techflow-solutions"
+    },
+    {
+      "id": "comp_002",
+      "name": "CloudSync Inc",
+      "industry": "Cloud Infrastructure",
+      "description": "Multi-cloud data synchronization services",
+      "founded": "2019",
+      "location": "Austin, TX",
+      "website": "https://cloudsync.io",
+      "linkedin_url": "https://linkedin.com/company/cloudsync"
+    },
+    {
+      "id": "comp_003",
+      "name": "DataVault Systems",
+      "industry": "Data Security",
+      "description": "Enterprise data encryption and backup solutions",
+      "founded": "2018",
+      "location": "Boston, MA",
+      "website": "https://datavault.com",
+      "linkedin_url": "https://linkedin.com/company/datavault"
+    },
+    {
+      "id": "comp_004",
+      "name": "AI Nexus Labs",
+      "industry": "Artificial Intelligence",
+      "description": "AI-powered business intelligence platform",
+      "founded": "2021",
+      "location": "Seattle, WA",
+      "website": "https://ainexus.ai",
+      "linkedin_url": "https://linkedin.com/company/ai-nexus"
+    },
+    {
+      "id": "comp_005",
+      "name": "SecureNet Technologies",
+      "industry": "Cybersecurity",
+      "description": "Next-generation network security solutions",
+      "founded": "2017",
+      "location": "New York, NY",
+      "website": "https://securenet.tech",
+      "linkedin_url": "https://linkedin.com/company/securenet"
+    },
+    {
+      "id": "comp_006",
+      "name": "GreenTech Innovations",
+      "industry": "Clean Energy",
+      "description": "Renewable energy management systems",
+      "founded": "2019",
+      "location": "Denver, CO",
+      "website": "https://greentech.io",
+      "linkedin_url": "https://linkedin.com/company/greentech"
+    },
+    {
+      "id": "comp_007",
+      "name": "MediCare AI",
+      "industry": "Healthcare Technology",
+      "description": "AI-driven healthcare diagnostics platform",
+      "founded": "2020",
+      "location": "Chicago, IL",
+      "website": "https://medicareai.com",
+      "linkedin_url": "https://linkedin.com/company/medicare-ai"
+    },
+    {
+      "id": "comp_008",
+      "name": "EduLearn Platform",
+      "industry": "EdTech",
+      "description": "Personalized online learning platform",
+      "founded": "2018",
+      "location": "San Diego, CA",
+      "website": "https://edulearn.com",
+      "linkedin_url": "https://linkedin.com/company/edulearn"
+    },
+    {
+      "id": "comp_009",
+      "name": "FinTech Dynamics",
+      "industry": "Financial Technology",
+      "description": "Digital banking and payment solutions",
+      "founded": "2019",
+      "location": "Miami, FL",
+      "website": "https://fintechdynamics.com",
+      "linkedin_url": "https://linkedin.com/company/fintech-dynamics"
+    },
+    {
+      "id": "comp_010",
+      "name": "RetailBot Systems",
+      "industry": "E-commerce",
+      "description": "AI-powered retail automation platform",
+      "founded": "2021",
+      "location": "Portland, OR",
+      "website": "https://retailbot.io",
+      "linkedin_url": "https://linkedin.com/company/retailbot"
+    }
+  ]
+}
+
