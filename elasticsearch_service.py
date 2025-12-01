@@ -885,3 +885,102 @@ def rebuild_index() -> Dict[str, Any]:
     
     return stats
 
+
+
+
+# For auto Suggestions...
+
+# ... (Keep previous imports and code) ...
+
+def get_auto_complete_suggestions(query_text: str, limit: int = 5) -> List[Dict[str, str]]:
+    """
+    Fast prefix search for auto-complete dropdowns.
+    Updated: Now includes NOTES and uses better field targeting.
+    """
+    if not query_text:
+        return []
+
+    suggestions = []
+    
+    search_body = {
+        "query": {
+            "multi_match": {
+                "query": query_text,
+                "type": "bool_prefix", 
+                "fields": [
+                    "title",                        
+                    "metadata.name",                
+                    "metadata.designation",         
+                    "metadata.location",            
+                    "metadata.industry",            
+                    "metadata.education",           
+                    "metadata.company",
+                    "content" # Added content for Notes/Docs prefix search
+                ]
+            }
+        },
+        "size": limit,
+        "_source": ["title", "card_type", "metadata", "id", "content"] 
+    }
+
+    # ADDED: INDEX_NOTES to the list
+    target_indices = [INDEX_PERSONS, INDEX_COMPANIES, INDEX_DOCUMENTS, INDEX_NOTES]
+    
+    for index in target_indices:
+        try:
+            if es.indices.exists(index=index):
+                res = es.search(index=index, body=search_body)
+                
+                for hit in res["hits"]["hits"]:
+                    src = hit["_source"]
+                    meta = src.get("metadata", {})
+                    
+                    # 1. Determine Display Text
+                    text = src.get("title") or meta.get("name")
+                    
+                    # 2. Determine Type & Context Hint
+                    type_ = "unknown"
+                    sub_text = ""
+                    
+                    if index == INDEX_COMPANIES: 
+                        type_ = "Company"
+                        if meta.get("location"): sub_text = meta.get("location")
+                        elif meta.get("industry"): sub_text = meta.get("industry")
+                        
+                    elif index == INDEX_PERSONS: 
+                        type_ = "Person"
+                        if meta.get("designation"): sub_text = meta.get("designation")
+                        elif meta.get("location"): sub_text = meta.get("location")
+                        
+                    elif index == INDEX_DOCUMENTS: 
+                        type_ = "Document"
+                        # For docs, maybe show the first few words of content?
+                        # sub_text = "File" 
+                        
+                    elif index == INDEX_NOTES:
+                        type_ = "Note"
+                        # For notes, show who it's attached to
+                        if meta.get("person_name"): sub_text = f"on {meta['person_name']}"
+                        elif meta.get("company_name"): sub_text = f"on {meta['company_name']}"
+
+                    if text:
+                        # Format: "Name (Extra Info)"
+                        display_text = f"{text} ({sub_text})" if sub_text else text
+                        
+                        suggestions.append({
+                            "text": display_text,
+                            "type": type_,
+                            "id": src.get("id")
+                        })
+        except Exception as e:
+            logger.warning(f"Suggestion error on {index}: {e}")
+
+    # 3. Deduplicate
+    seen = set()
+    unique_suggestions = []
+    for s in suggestions:
+        if s["text"] not in seen:
+            seen.add(s["text"])
+            unique_suggestions.append(s)
+            
+    return unique_suggestions[:limit]

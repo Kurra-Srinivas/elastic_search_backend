@@ -25,6 +25,10 @@ from elasticsearch_service import (
     search_notes_es,
     get_card_by_id_es
 )
+
+# --- ADD THIS IMPORT AT THE TOP ---
+from elasticsearch_service import get_auto_complete_suggestions
+
 from document_extractor import extract_text_from_file
 from upload_status import create_upload_status, update_upload_status, get_upload_status, complete_upload_status
 from notes_service import get_note, save_note
@@ -544,3 +548,21 @@ async def chat_endpoint(chat_request: ChatMessage):
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat service error: {str(e)}")
+
+
+
+# --- ADD THIS ENDPOINT ---
+@app.get("/api/suggest")
+async def auto_suggest_endpoint(query: str):
+    """
+    Fast endpoint for search bar auto-completion.
+    Returns list of names/titles matching the prefix.
+    """
+    if not query or len(query) < 2:
+        return []  # Don't search for 1 letter
+        
+    try:
+        return get_auto_complete_suggestions(query)
+    except Exception as e:
+        logger.error(f"Auto-suggest failed: {e}")
+        return []
