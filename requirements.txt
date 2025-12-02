@@ -11,4 +11,6 @@ sentence-transformers
 torch
 sqlalchemy
 rapidfuzz
+langchain-community
+tavily-python
 
