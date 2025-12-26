@@ -23,11 +23,14 @@ from elasticsearch_service import (
     search_companies_es,
     search_persons_es,
     search_notes_es,
-    get_card_by_id_es
+    get_card_by_id_es,
+    get_auto_complete_suggestions, # Logic for auto-complete
+    es, # Importing es client for direct queries
+    INDEX_NOTES,
+    INDEX_DOCUMENTS,
+    INDEX_PERSONS,
+    INDEX_COMPANIES
 )
-
-# --- ADD THIS IMPORT AT THE TOP ---
-from elasticsearch_service import get_auto_complete_suggestions
 
 from document_extractor import extract_text_from_file
 from upload_status import create_upload_status, update_upload_status, get_upload_status, complete_upload_status
@@ -44,7 +47,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Data models
+# --- Data Models ---
+
 class CompanyCardData(BaseModel):
     id: str
     name: str
@@ -115,14 +119,14 @@ BASE_DIR = Path(__file__).parent
 UPLOADS_DIR = BASE_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
+# --- Helper Functions ---
+
 def load_person_cards(count: Optional[int] = None) -> List[PersonCardData]:
     """Load person cards from Elasticsearch"""
     if not check_elasticsearch_connection():
         return []
     
     try:
-        from elasticsearch_service import es, INDEX_PERSONS
-        
         # Get all persons from Elasticsearch
         response = es.search(
             index=INDEX_PERSONS,
@@ -158,8 +162,6 @@ def load_company_cards(count: Optional[int] = None) -> List[CompanyCardData]:
         return []
     
     try:
-        from elasticsearch_service import es, INDEX_COMPANIES
-        
         # Get all companies from Elasticsearch
         response = es.search(
             index=INDEX_COMPANIES,
@@ -200,6 +202,8 @@ def get_card_by_id(card_id: str) -> Optional[CompanyCardData | PersonCardData]:
         return PersonCardData(**card_dict)
     return None
 
+# --- Startup Event ---
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize Elasticsearch and load embedding model on startup"""
@@ -224,6 +228,8 @@ async def startup_event():
         logger.warning("Elasticsearch not available. Search functionality will be limited.")
 
 
+# --- Endpoints ---
+
 @app.get("/")
 async def root():
     return {"message": "Search UI Backend API", "version": "1.0.0"}
@@ -241,9 +247,102 @@ async def get_cards(card_type: Optional[str] = None):
         persons = load_person_cards(10)
         return companies + persons
 
+# --- UPDATED SEARCH FUNCTION WITH ENTITY_ID SUPPORT ---
+
 @app.get("/api/cards/search", response_model=SearchResultsResponse)
-async def search_cards(query: str = "", limit: int = 50):
-    """Search across all categories: companies, persons, notes, and documents"""
+async def search_cards(query: str = "", entity_id: Optional[str] = None, limit: int = 50):
+    """
+    Search across all categories.
+    If entity_id is provided, fetches ONLY that entity and its related items (Exact Lookup).
+    If no entity_id, performs text/fuzzy search using query string.
+    """
+    results = SearchResultsResponse()
+    
+    # Check if Elasticsearch is available
+    if not check_elasticsearch_connection():
+        logger.warning("Elasticsearch not available for search")
+        return results
+
+    # --- CASE A: SPECIFIC ENTITY SELECTED (from Dropdown) ---
+    if entity_id:
+        # 1. Fetch the specific Card
+        card = get_card_by_id(entity_id)
+        if card:
+            if card.card_type == "company":
+                results.companies = [card]
+            else:
+                results.persons = [card]
+                
+            # 2. Fetch Notes for this Card (Exact Match on card_id)
+            try:
+                note_response = es.search(
+                    index=INDEX_NOTES,
+                    body={
+                        "query": {"term": {"card_id": entity_id}},
+                        "size": 50
+                    }
+                )
+                for hit in note_response["hits"]["hits"]:
+                    source = hit["_source"]
+                    metadata = source.get("metadata", {})
+                    
+                    # FIX: Use 'note_text' from metadata if available (Clean), otherwise 'content'
+                    clean_note = metadata.get("note_text") or source.get("content", "")
+                    
+                    note_data = {
+                        "id": hit["_id"],
+                        "card_id": entity_id,
+                        "card_type": card.card_type,
+                        "note": clean_note, # <--- Updated
+                        "parent_card": {
+                            "id": card.id,
+                            "name": card.name,
+                            "type": card.card_type
+                        }
+                    }
+                    results.notes.append(note_data)
+            except Exception as e:
+                logger.error(f"Error fetching notes for entity: {e}")
+
+            # 3. Fetch Documents for this Card (Exact Match on card_id)
+            try:
+                doc_response = es.search(
+                    index=INDEX_DOCUMENTS,
+                    body={
+                        "query": {"term": {"card_id": entity_id}},
+                        "size": 50
+                    }
+                )
+                
+                seen_doc_ids = set()
+                for hit in doc_response["hits"]["hits"]:
+                    # Deduping chunks -> show 1 entry per file
+                    meta = hit["_source"].get("metadata", {})
+                    filename = meta.get("original_filename") or meta.get("filename", "Unknown")
+                    
+                    if filename not in seen_doc_ids:
+                        doc_data = {
+                            "id": hit["_id"],
+                            "card_id": entity_id,
+                            "filename": filename,
+                            "stored_filename": meta.get("filename", ""),
+                            "chunk_index": 0,
+                            "content_preview": hit["_source"].get("content", "")[:200],
+                            "score": 1.0, # Exact match
+                            "parent_card": {
+                                "id": card.id,
+                                "name": card.name,
+                                "type": card.card_type
+                            }
+                        }
+                        results.documents.append(doc_data)
+                        seen_doc_ids.add(filename)
+            except Exception as e:
+                logger.error(f"Error fetching docs for entity: {e}")
+
+        return results
+
+    # --- CASE B: TEXT SEARCH (Original Logic) ---
     if not query:
         # Return default cards if no query
         return SearchResultsResponse(
@@ -252,15 +351,6 @@ async def search_cards(query: str = "", limit: int = 50):
             notes=[],
             documents=[]
         )
-    
-    results = SearchResultsResponse()
-    
-    # Check if Elasticsearch is available
-    es_available = check_elasticsearch_connection()
-    
-    if not es_available:
-        logger.warning("Elasticsearch not available for search")
-        return results
     
     # Search companies using Elasticsearch
     try:
@@ -314,11 +404,16 @@ async def search_cards(query: str = "", limit: int = 50):
         for es_result in note_results:
             card_id = es_result["card_id"]
             parent_card = get_card_by_id(card_id)
+            
+            # FIX: Extract clean note from metadata if available
+            metadata = es_result.get("metadata", {})
+            clean_note = metadata.get("note_text") or es_result.get("content", "")
+            
             note_data = {
                 "id": es_result["id"],
                 "card_id": card_id,
-                "card_type": es_result.get("metadata", {}).get("card_type", "unknown"),
-                "note": es_result.get("content", ""),
+                "card_type": metadata.get("card_type", "unknown"),
+                "note": clean_note, # <--- Updated
                 "parent_card": None
             }
             if parent_card:
@@ -359,8 +454,8 @@ async def search_cards(query: str = "", limit: int = 50):
                         doc_data = {
                             "id": doc_result["id"],
                             "card_id": card_id,
-                            "filename": original_filename,  # Show original filename
-                            "stored_filename": stored_filename,  # Keep stored for reference
+                            "filename": original_filename,
+                            "stored_filename": stored_filename,
                             "chunk_index": metadata.get("chunk_index", 0),
                             "content_preview": doc_result["content"][:200] + "..." if len(doc_result["content"]) > 200 else doc_result["content"],
                             "score": doc_result["score"],
@@ -637,8 +732,6 @@ async def chat_endpoint(chat_request: ChatMessage):
         raise HTTPException(status_code=500, detail=f"Chat service error: {str(e)}")
 
 
-
-# --- ADD THIS ENDPOINT ---
 @app.get("/api/suggest")
 async def auto_suggest_endpoint(query: str):
     """

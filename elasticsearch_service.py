@@ -60,8 +60,45 @@ def check_elasticsearch_connection() -> bool:
         return False
 
 
-def _get_index_mapping() -> Dict[str, Any]:
-    """Get the common index mapping for all indices"""
+# --- MAPPINGS ---
+
+def _get_company_mapping() -> Dict[str, Any]:
+    """Specific Schema for Companies (Includes mapped_person_ids)"""
+    return {
+        "mappings": {
+            "properties": {
+                "id": {"type": "keyword"},
+                "card_id": {"type": "keyword"},
+                "title": {
+                    "type": "text",
+                    "fields": {
+                        "keyword": {"type": "keyword", "ignore_above": 256}
+                    }
+                },
+                "content": {
+                    "type": "text",
+                    "analyzer": "standard"
+                },
+                "metadata": {
+                    "properties": {
+                        # Store list of person IDs here
+                        "mapped_person_ids": {"type": "keyword"},
+                        "name": {"type": "text"},
+                        "industry": {"type": "keyword"},
+                        "location": {"type": "text"},
+                        "founded": {"type": "keyword"},
+                        "linkedin_url": {"type": "keyword"},
+                        "website": {"type": "keyword"}
+                    }
+                },
+                "created_at": {"type": "date"},
+                "updated_at": {"type": "date"}
+            }
+        }
+    }
+
+def _get_generic_mapping() -> Dict[str, Any]:
+    """Generic mapping for Persons, Notes, Documents"""
     return {
         "mappings": {
             "properties": {
@@ -90,27 +127,25 @@ def _get_index_mapping() -> Dict[str, Any]:
                 "created_at": {"type": "date"},
                 "updated_at": {"type": "date"}
             }
-        },
-        "settings": {
-            "index": {
-                "number_of_shards": 1,
-                "number_of_replicas": 0
-            }
         }
     }
 
 
 def create_index(index_name: str) -> bool:
-    """Create a specific index with dense vector support"""
+    """Create a specific index with appropriate mapping"""
     if es.indices.exists(index=index_name):
         logger.info(f"Index {index_name} already exists")
         return True
     
-    mapping = _get_index_mapping()
+    # Use specific mapping for Companies, generic for others
+    if index_name == INDEX_COMPANIES:
+        mapping = _get_company_mapping()
+    else:
+        mapping = _get_generic_mapping()
     
     try:
         es.indices.create(index=index_name, body=mapping)
-        logger.info(f"Created index {index_name} with dense vector support for embeddings")
+        logger.info(f"Created index {index_name} with specific mapping")
         return True
     except Exception as e:
         logger.error(f"Failed to create index {index_name}: {e}")
@@ -128,9 +163,8 @@ def create_all_indices() -> bool:
 
 
 def index_company_card(company_data: Dict[str, Any]) -> bool:
-    """Index a company card in Elasticsearch for keyword and fuzzy search"""
+    """Index a company card with mapped_person_ids"""
     try:
-        # Ensure index exists
         if not es.indices.exists(index=INDEX_COMPANIES):
             create_index(INDEX_COMPANIES)
         
@@ -152,21 +186,25 @@ def index_company_card(company_data: Dict[str, Any]) -> bool:
         
         searchable_content = " ".join(searchable_fields)
         
+        # Prepare Metadata
+        metadata = {
+            "name": company_data.get("name"),
+            "industry": company_data.get("industry"),
+            "description": company_data.get("description"),
+            "founded": company_data.get("founded"),
+            "location": company_data.get("location"),
+            "website": company_data.get("website"),
+            "linkedin_url": company_data.get("linkedin_url"),
+            "mapped_person_ids": company_data.get("mapped_person_ids", [])
+        }
+
         doc = {
             "id": company_id,
             "card_id": company_id,
             "card_type": "company",
             "title": company_data.get("name", ""),
             "content": searchable_content,
-            "metadata": {
-                "name": company_data.get("name"),
-                "industry": company_data.get("industry"),
-                "description": company_data.get("description"),
-                "founded": company_data.get("founded"),
-                "location": company_data.get("location"),
-                "website": company_data.get("website"),
-                "linkedin_url": company_data.get("linkedin_url")
-            },
+            "metadata": metadata,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         }
@@ -182,7 +220,6 @@ def index_company_card(company_data: Dict[str, Any]) -> bool:
 def index_person_card(person_data: Dict[str, Any]) -> bool:
     """Index a person card in Elasticsearch for keyword and fuzzy search"""
     try:
-        # Ensure index exists
         if not es.indices.exists(index=INDEX_PERSONS):
             create_index(INDEX_PERSONS)
         
@@ -237,50 +274,41 @@ def index_person_card(person_data: Dict[str, Any]) -> bool:
 def index_document(card_id: str, filename: str, extracted_text: str, metadata: Optional[Dict[str, Any]] = None, status_id: Optional[str] = None) -> bool:
     """Index a document (PDF/DOCX) with chunking"""
     try:
-        # Ensure index exists
         if not es.indices.exists(index=INDEX_DOCUMENTS):
             create_index(INDEX_DOCUMENTS)
         from text_chunker import chunk_text_by_sentences
         
-        # Chunk the document text
         chunks = chunk_text_by_sentences(extracted_text, max_chunk_size=500, overlap_sentences=1)
         
         if not chunks:
             logger.warning(f"No chunks created for document {filename}")
             return False
         
-        # Update status with total chunks
         if status_id:
             from upload_status import update_upload_status
             update_upload_status(status_id, "indexing", 60, f"Indexing {len(chunks)} chunks...", chunks_total=len(chunks))
         
-        # Index each chunk as a separate document
         indexed_count = 0
         for chunk_idx, chunk_text in enumerate(chunks):
             if not chunk_text.strip():
                 continue
                 
-            # Create unique ID for each chunk
             chunk_id = f"doc_{card_id}_{filename}_chunk_{chunk_idx}"
-            
-            # Generate embedding for this chunk
             embedding = generate_embedding(chunk_text)
-            
-            # Get original filename from metadata if available
             original_filename = (metadata or {}).get("original_filename", filename)
             
             doc = {
                 "id": chunk_id,
                 "card_id": card_id,
-                "title": f"{original_filename} (chunk {chunk_idx + 1})",  # Use original filename in title
+                "title": f"{original_filename} (chunk {chunk_idx + 1})",
                 "content": chunk_text,
                 "text_embedding": embedding,
                 "metadata": {
-                    "filename": filename,  # Store stored filename for deletion
+                    "filename": filename,
                     "card_id": card_id,
                     "chunk_index": chunk_idx,
                     "total_chunks": len(chunks),
-                    "original_filename": original_filename,  # Store original for display
+                    "original_filename": original_filename,
                     **(metadata or {})
                 },
                 "created_at": datetime.now().isoformat(),
@@ -290,9 +318,8 @@ def index_document(card_id: str, filename: str, extracted_text: str, metadata: O
             es.index(index=INDEX_DOCUMENTS, id=chunk_id, document=doc)
             indexed_count += 1
             
-            # Update progress
             if status_id:
-                progress = 60 + int((chunk_idx + 1) / len(chunks) * 35)  # 60-95%
+                progress = 60 + int((chunk_idx + 1) / len(chunks) * 35)
                 update_upload_status(status_id, "indexing", progress, 
                                     f"Indexing chunk {chunk_idx + 1}/{len(chunks)}...",
                                     chunks_indexed=chunk_idx + 1)
@@ -308,101 +335,51 @@ def delete_document_by_filename(card_id: str, filename: str) -> bool:
     """Delete all document chunks for a specific filename from Elasticsearch"""
     try:
         if not es.indices.exists(index=INDEX_DOCUMENTS):
-            logger.warning(f"Documents index does not exist")
             return False
         
-        logger.info(f"Attempting to delete chunks for card_id={card_id}, filename={filename}")
-        
-        # First, search all chunks for this card to see what we have
         search_all = es.search(
             index=INDEX_DOCUMENTS,
-            body={
-                "query": {"term": {"card_id": card_id}},
-                "size": 10000
-            }
+            body={"query": {"term": {"card_id": card_id}}, "size": 10000}
         )
         
-        logger.info(f"Found {search_all['hits']['total']['value']} total chunks for card_id {card_id}")
-        
-        # Filter chunks by filename in metadata (this handles both original and stored filenames)
         chunks_to_delete = []
-        found_filenames = set()
-        
         for hit in search_all["hits"]["hits"]:
             metadata = hit["_source"].get("metadata", {})
             stored_filename = metadata.get("filename", "")
             chunk_id = hit["_id"]
-            found_filenames.add(stored_filename)
             
-            # Match if filename matches stored filename OR if stored filename ends with the given filename
-            # (handles case where stored filename is card_id_uuid.ext but we're searching for original.ext)
             if stored_filename == filename or stored_filename.endswith(filename) or filename in stored_filename:
                 chunks_to_delete.append(chunk_id)
-                logger.debug(f"Matched chunk {chunk_id} with filename '{stored_filename}'")
-        
-        logger.info(f"Found filenames in index: {found_filenames}")
-        logger.info(f"Matched {len(chunks_to_delete)} chunks to delete")
-        
-        if not chunks_to_delete:
-            logger.warning(f"No chunks found for file {filename} with card_id {card_id}")
-            logger.warning(f"Available filenames for this card: {found_filenames}")
-            return False
-        
-        # Delete chunks individually (more reliable than delete_by_query)
-        deleted_count = 0
-        failed_count = 0
         
         for chunk_id in chunks_to_delete:
             try:
                 es.delete(index=INDEX_DOCUMENTS, id=chunk_id)
-                deleted_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to delete chunk {chunk_id}: {e}")
-                failed_count += 1
+            except Exception: pass
         
-        # Force refresh to make deletions immediately visible
         es.indices.refresh(index=INDEX_DOCUMENTS)
-        
-        logger.info(f"Deleted {deleted_count} chunks for file {filename} (card_id: {card_id}), {failed_count} failed")
-        
-        if deleted_count == 0:
-            logger.error(f"Failed to delete any chunks! This might indicate a filename mismatch.")
-            return False
-        
         return True
     except Exception as e:
         logger.error(f"Failed to delete document chunks for {filename}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
         return False
 
 
 def delete_card_from_index(card_id: str, card_type: str) -> bool:
     """Delete a card and all associated documents from Elasticsearch"""
     try:
-        # Delete from appropriate index based on card_type
         index_map = {
             "company": INDEX_COMPANIES,
             "person": INDEX_PERSONS,
             "note": INDEX_NOTES
         }
         
-        # Delete the card itself
         if card_type in index_map:
             index_name = index_map[card_type]
             if es.indices.exists(index=index_name):
                 es.delete(index=index_name, id=card_id, ignore=[404])
-                logger.debug(f"Deleted {card_type} {card_id} from index {index_name}")
         
-        # Delete associated documents
         if es.indices.exists(index=INDEX_DOCUMENTS):
-            query = {
-                "query": {
-                    "term": {"card_id": card_id}
-                }
-            }
+            query = {"query": {"term": {"card_id": card_id}}}
             es.delete_by_query(index=INDEX_DOCUMENTS, body=query)
-            logger.debug(f"Deleted documents for card: {card_id}")
         
         return True
     except Exception as e:
@@ -411,63 +388,26 @@ def delete_card_from_index(card_id: str, card_type: str) -> bool:
 
 
 def search_companies_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Search companies using Elasticsearch with keyword and fuzzy matching
-    Direct matches rank higher than fuzzy matches
-    """
+    """Search companies using Elasticsearch"""
     try:
-        if not query or not query.strip():
-            return []
+        if not query or not query.strip(): return []
         
-        # Build query with direct matches boosted higher than fuzzy
         search_body = {
             "query": {
                 "bool": {
                     "should": [
-                        # Direct keyword matches (boosted higher)
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^3", "content^2"],
-                                "type": "phrase_prefix",  # Exact phrase matches rank highest
-                                "boost": 3.0
-                            }
-                        },
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^3", "content^2"],
-                                "type": "best_fields",  # Direct keyword matches
-                                "boost": 2.0
-                            }
-                        },
-                        # Fuzzy matches (lower boost)
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^2", "content"],
-                                "type": "best_fields",
-                                "fuzziness": "AUTO",  # Automatic fuzziness based on term length
-                                "boost": 1.0
-                            }
-                        }
+                        {"multi_match": {"query": query, "fields": ["title^3", "content^2"], "type": "phrase_prefix", "boost": 3.0}},
+                        {"multi_match": {"query": query, "fields": ["title^3", "content^2"], "type": "best_fields", "boost": 2.0}},
+                        {"multi_match": {"query": query, "fields": ["title^2", "content"], "type": "best_fields", "fuzziness": "AUTO", "boost": 1.0}}
                     ],
                     "minimum_should_match": 1
                 }
             },
             "size": limit,
-            "_source": ["id", "card_id", "card_type", "title", "content", "metadata", "_score"],
-            "highlight": {
-                "fields": {
-                    "title": {},
-                    "content": {}
-                }
-            }
+            "_source": ["id", "card_id", "card_type", "title", "content", "metadata", "_score"]
         }
         
-        if not es.indices.exists(index=INDEX_COMPANIES):
-            return []
-        
+        if not es.indices.exists(index=INDEX_COMPANIES): return []
         response = es.search(index=INDEX_COMPANIES, body=search_body)
         
         results = []
@@ -479,10 +419,8 @@ def search_companies_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
                 "title": hit["_source"]["title"],
                 "content": hit["_source"].get("content", ""),
                 "metadata": hit["_source"].get("metadata", {}),
-                "score": hit["_score"],
-                "highlights": hit.get("highlight", {})
+                "score": hit["_score"]
             })
-        
         return results
     except Exception as e:
         logger.error(f"Elasticsearch company search failed: {e}")
@@ -490,63 +428,26 @@ def search_companies_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
 
 
 def search_persons_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Search persons using Elasticsearch with keyword and fuzzy matching
-    Direct matches rank higher than fuzzy matches
-    """
+    """Search persons using Elasticsearch"""
     try:
-        if not query or not query.strip():
-            return []
+        if not query or not query.strip(): return []
         
-        # Build query with direct matches boosted higher than fuzzy
         search_body = {
             "query": {
                 "bool": {
                     "should": [
-                        # Direct keyword matches (boosted higher)
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^3", "content^2"],
-                                "type": "phrase_prefix",
-                                "boost": 3.0
-                            }
-                        },
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^3", "content^2"],
-                                "type": "best_fields",
-                                "boost": 2.0
-                            }
-                        },
-                        # Fuzzy matches (lower boost)
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^2", "content"],
-                                "type": "best_fields",
-                                "fuzziness": "AUTO",
-                                "boost": 1.0
-                            }
-                        }
+                        {"multi_match": {"query": query, "fields": ["title^3", "content^2"], "type": "phrase_prefix", "boost": 3.0}},
+                        {"multi_match": {"query": query, "fields": ["title^3", "content^2"], "type": "best_fields", "boost": 2.0}},
+                        {"multi_match": {"query": query, "fields": ["title^2", "content"], "type": "best_fields", "fuzziness": "AUTO", "boost": 1.0}}
                     ],
                     "minimum_should_match": 1
                 }
             },
             "size": limit,
-            "_source": ["id", "card_id", "card_type", "title", "content", "metadata", "_score"],
-            "highlight": {
-                "fields": {
-                    "title": {},
-                    "content": {}
-                }
-            }
+            "_source": ["id", "card_id", "card_type", "title", "content", "metadata", "_score"]
         }
         
-        if not es.indices.exists(index=INDEX_PERSONS):
-            return []
-        
+        if not es.indices.exists(index=INDEX_PERSONS): return []
         response = es.search(index=INDEX_PERSONS, body=search_body)
         
         results = []
@@ -558,10 +459,8 @@ def search_persons_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
                 "title": hit["_source"]["title"],
                 "content": hit["_source"].get("content", ""),
                 "metadata": hit["_source"].get("metadata", {}),
-                "score": hit["_score"],
-                "highlights": hit.get("highlight", {})
+                "score": hit["_score"]
             })
-        
         return results
     except Exception as e:
         logger.error(f"Elasticsearch person search failed: {e}")
@@ -569,62 +468,26 @@ def search_persons_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
 
 
 def search_notes_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Search notes using Elasticsearch with keyword and fuzzy matching
-    Direct matches rank higher than fuzzy matches
-    """
+    """Search notes using Elasticsearch"""
     try:
-        if not query or not query.strip():
-            return []
+        if not query or not query.strip(): return []
         
-        # Build query with direct matches boosted higher than fuzzy
         search_body = {
             "query": {
                 "bool": {
                     "should": [
-                        # Direct keyword matches (boosted higher)
-                        {
-                            "match": {
-                                "content": {
-                                    "query": query,
-                                    "boost": 3.0
-                                }
-                            }
-                        },
-                        {
-                            "match_phrase_prefix": {
-                                "content": {
-                                    "query": query,
-                                    "boost": 2.5
-                                }
-                            }
-                        },
-                        # Fuzzy matches (lower boost)
-                        {
-                            "match": {
-                                "content": {
-                                    "query": query,
-                                    "fuzziness": "AUTO",
-                                    "boost": 1.0
-                                }
-                            }
-                        }
+                        {"match": {"content": {"query": query, "boost": 3.0}}},
+                        {"match_phrase_prefix": {"content": {"query": query, "boost": 2.5}}},
+                        {"match": {"content": {"query": query, "fuzziness": "AUTO", "boost": 1.0}}}
                     ],
                     "minimum_should_match": 1
                 }
             },
             "size": limit,
-            "_source": ["id", "card_id", "card_type", "title", "content", "metadata", "_score"],
-            "highlight": {
-                "fields": {
-                    "content": {}
-                }
-            }
+            "_source": ["id", "card_id", "card_type", "title", "content", "metadata", "_score"]
         }
         
-        if not es.indices.exists(index=INDEX_NOTES):
-            return []
-        
+        if not es.indices.exists(index=INDEX_NOTES): return []
         response = es.search(index=INDEX_NOTES, body=search_body)
         
         results = []
@@ -636,10 +499,8 @@ def search_notes_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
                 "title": hit["_source"]["title"],
                 "content": hit["_source"].get("content", ""),
                 "metadata": hit["_source"].get("metadata", {}),
-                "score": hit["_score"],
-                "highlights": hit.get("highlight", {})
+                "score": hit["_score"]
             })
-        
         return results
     except Exception as e:
         logger.error(f"Elasticsearch note search failed: {e}")
@@ -647,80 +508,40 @@ def search_notes_es(query: str, limit: int = 50) -> List[Dict[str, Any]]:
 
 
 def hybrid_search(query: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Perform hybrid search combining keyword (BM25) and semantic (vector) search
-    Uses sentence-transformers embeddings for semantic search
-    Falls back to keyword-only if embeddings fail
-    """
+    """Hybrid search combining keyword (BM25) and semantic (vector) search"""
     try:
-        # Keyword search (BM25) - always use this
-        keyword_query = {
-            "multi_match": {
-                "query": query,
-                "fields": ["title^3", "content^2"],
-                "type": "best_fields",
-                "fuzziness": "AUTO"
-            }
-        }
+        keyword_query = {"multi_match": {"query": query, "fields": ["title^3", "content^2"], "type": "best_fields", "fuzziness": "AUTO"}}
         
-        # Try to generate embedding for vector search
         query_embedding = None
         try:
             query_embedding = generate_embedding(query)
-        except Exception as e:
-            logger.debug(f"Failed to generate embedding: {e}, using keyword search only")
+        except Exception: pass
         
-        # Build search body - use hybrid if embedding available, otherwise keyword-only
         if query_embedding and len(query_embedding) > 0:
-            # Hybrid search with both keyword and vector
             search_body = {
                 "knn": {
-                    "field": "text_embedding",
-                    "query_vector": query_embedding,
-                    "k": limit,
-                    "num_candidates": limit * 2,
-                    "boost": 0.5  # Weight for vector search
+                    "field": "text_embedding", "query_vector": query_embedding, "k": limit, "num_candidates": limit * 2, "boost": 0.5
                 },
                 "query": {
-                    "bool": {
-                        "should": [
-                            keyword_query
-                        ],
-                        "boost": 1.0  # Weight for keyword search
-                    }
+                    "bool": {"should": [keyword_query], "boost": 1.0}
                 },
                 "size": limit,
                 "_source": ["id", "card_type", "card_id", "title", "content", "metadata", "_score"],
-                "highlight": {
-                    "fields": {
-                        "title": {},
-                        "content": {}
-                    }
-                }
+                "highlight": {"fields": {"title": {}, "content": {}}}
             }
         else:
-            # Keyword-only search (fallback)
             search_body = {
                 "query": keyword_query,
                 "size": limit,
                 "_source": ["id", "card_type", "card_id", "title", "content", "metadata", "_score"],
-                "highlight": {
-                    "fields": {
-                        "title": {},
-                        "content": {}
-                    }
-                }
+                "highlight": {"fields": {"title": {}, "content": {}}}
             }
         
-        # Search only documents index (companies, persons, notes use separate search functions)
         all_results = []
-        
         for index_name in [INDEX_DOCUMENTS]:
             try:
                 response = es.search(index=index_name, body=search_body)
-                
                 for hit in response["hits"]["hits"]:
-                    # Only documents are indexed now
                     result = {
                         "id": hit["_source"]["id"],
                         "card_type": "document",
@@ -733,27 +554,19 @@ def hybrid_search(query: str, limit: int = 50) -> List[Dict[str, Any]]:
                         "index": index_name
                     }
                     all_results.append(result)
-            except Exception as e:
-                logger.warning(f"Search failed for index {index_name}: {e}")
-                continue
+            except Exception: continue
         
-        # Group results by card_id to handle multiple document chunks per card
-        # For each card, keep only the highest scoring match
         card_results = {}
         for result in all_results:
             card_id = result["card_id"]
-            # For documents, aggregate by taking the max score
             if card_id not in card_results:
                 card_results[card_id] = result
             else:
-                # Keep the highest scoring chunk for this card
                 if result["score"] > card_results[card_id]["score"]:
                     card_results[card_id] = result
         
-        # Convert back to list and sort by score
         aggregated_results = list(card_results.values())
         aggregated_results.sort(key=lambda x: x["score"], reverse=True)
-        
         return aggregated_results[:limit]
     except Exception as e:
         logger.error(f"Search failed: {e}")
@@ -761,43 +574,29 @@ def hybrid_search(query: str, limit: int = 50) -> List[Dict[str, Any]]:
 
 
 def index_note(card_id: str, note: str, card_type: str, card_metadata: Optional[Dict[str, Any]] = None) -> bool:
-    """Index a note for a card with full card metadata"""
+    """Index a note"""
     try:
-        # Ensure index exists
         if not es.indices.exists(index=INDEX_NOTES):
             create_index(INDEX_NOTES)
         
         if not note or not note.strip():
-            # Delete note if empty
             es.delete(index=INDEX_NOTES, id=f"note_{card_id}", ignore=[404])
             return True
         
-        # Build searchable content including card info
         content_parts = [note]
         if card_metadata:
             if card_type == "company" and card_metadata.get("name"):
                 content_parts.append(f"Company: {card_metadata['name']}")
-                if card_metadata.get("industry"):
-                    content_parts.append(f"Industry: {card_metadata['industry']}")
+                if card_metadata.get("industry"): content_parts.append(f"Industry: {card_metadata['industry']}")
             elif card_type == "person" and card_metadata.get("name"):
                 content_parts.append(f"Person: {card_metadata['name']}")
-                if card_metadata.get("company"):
-                    content_parts.append(f"Company: {card_metadata['company']}")
-                if card_metadata.get("designation"):
-                    content_parts.append(f"Designation: {card_metadata['designation']}")
+                if card_metadata.get("company"): content_parts.append(f"Company: {card_metadata['company']}")
+                if card_metadata.get("designation"): content_parts.append(f"Designation: {card_metadata['designation']}")
         
         searchable_content = " ".join(content_parts)
-        
-        # Generate embedding for semantic search (includes note + card context)
         embedding = generate_embedding(searchable_content)
         
-        # Build metadata with full card info
-        metadata = {
-            "card_id": card_id,
-            "card_type": card_type
-        }
-        
-        # Add card-specific metadata
+        metadata = {"card_id": card_id, "card_type": card_type}
         if card_metadata:
             if card_type == "company":
                 metadata.update({
@@ -819,255 +618,183 @@ def index_note(card_id: str, note: str, card_type: str, card_metadata: Optional[
             "id": f"note_{card_id}",
             "card_id": card_id,
             "title": f"Note for {card_metadata.get('name', card_id) if card_metadata else card_id}",
-            "content": searchable_content,  # Includes note + card context for better search
+            "content": searchable_content,
             "text_embedding": embedding,
-            "metadata": {
-                **metadata,
-                "note_text": note  # Store original note text separately for easy retrieval
-            },
+            "metadata": {**metadata, "note_text": note},
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         }
-        
         es.index(index=INDEX_NOTES, id=f"note_{card_id}", document=doc)
-        logger.info(f"Indexed note for card: {card_id} with metadata")
         return True
     except Exception as e:
-        logger.error(f"Failed to index note for card {card_id}: {e}")
+        logger.error(f"Failed to index note: {e}")
         return False
 
 
 def get_card_by_id_es(card_id: str) -> Optional[Dict[str, Any]]:
-    """Get a card (company or person) by its ID from Elasticsearch - returns dict with card data"""
+    """Get a card by ID"""
     try:
-        # Try company index first
         if es.indices.exists(index=INDEX_COMPANIES):
             try:
-                response = es.get(index=INDEX_COMPANIES, id=card_id)
-                metadata = response["_source"].get("metadata", {})
-                return {
-                    "id": response["_source"]["id"],
-                    "name": metadata.get("name", ""),
-                    "industry": metadata.get("industry"),
-                    "description": metadata.get("description"),
-                    "founded": metadata.get("founded"),
-                    "location": metadata.get("location"),
-                    "website": metadata.get("website"),
-                    "linkedin_url": metadata.get("linkedin_url"),
-                    "card_type": "company"
-                }
-            except Exception:
-                pass
-        
-        # Try person index
+                res = es.get(index=INDEX_COMPANIES, id=card_id)
+                return {**res["_source"].get("metadata", {}), "id": res["_source"]["id"], "card_type": "company"}
+            except: pass
         if es.indices.exists(index=INDEX_PERSONS):
             try:
-                response = es.get(index=INDEX_PERSONS, id=card_id)
-                metadata = response["_source"].get("metadata", {})
-                return {
-                    "id": response["_source"]["id"],
-                    "name": metadata.get("name", ""),
-                    "designation": metadata.get("designation"),
-                    "company": metadata.get("company"),
-                    "linkedin_id": metadata.get("linkedin_id", ""),
-                    "linkedin_url": metadata.get("linkedin_url", ""),
-                    "education": metadata.get("education"),
-                    "experience_years": metadata.get("experience_years"),
-                    "location": metadata.get("location"),
-                    "card_type": "person"
-                }
-            except Exception:
-                pass
-        
-        return None
-    except Exception as e:
-        logger.error(f"Failed to get card {card_id} from Elasticsearch: {e}")
-        return None
+                res = es.get(index=INDEX_PERSONS, id=card_id)
+                return {**res["_source"].get("metadata", {}), "id": res["_source"]["id"], "card_type": "person"}
+            except: pass
+    except: pass
+    return None
 
+
+def get_auto_complete_suggestions(query_text: str, limit: int = 5) -> List[Dict[str, str]]:
+    """Fast prefix search for auto-complete"""
+    if not query_text: return []
+    suggestions = []
+    search_body = {
+        "query": {
+            "multi_match": {
+                "query": query_text,
+                "type": "bool_prefix",
+                "fields": ["title", "metadata.name", "metadata.designation", "metadata.location", "metadata.industry", "metadata.company"]
+            }
+        },
+        "size": limit,
+        "_source": ["title", "card_type", "metadata", "id"]
+    }
+    
+    for index in [INDEX_PERSONS, INDEX_COMPANIES, INDEX_DOCUMENTS, INDEX_NOTES]:
+        try:
+            if es.indices.exists(index=index):
+                res = es.search(index=index, body=search_body)
+                for hit in res["hits"]["hits"]:
+                    src = hit["_source"]
+                    meta = src.get("metadata", {})
+                    text = src.get("title") or meta.get("name")
+                    type_ = "unknown"
+                    if index == INDEX_COMPANIES: type_ = "Company"
+                    elif index == INDEX_PERSONS: type_ = "Person"
+                    elif index == INDEX_DOCUMENTS: 
+                        text = meta.get("original_filename") or src.get("title", "").split(" (chunk")[0]
+                        type_ = "Document"
+                    elif index == INDEX_NOTES: type_ = "Note"
+                    
+                    if text:
+                        suggestions.append({"text": text, "type": type_, "id": src.get("id")})
+        except: pass
+        
+    seen = set()
+    unique = []
+    for s in suggestions:
+        if s["text"] not in seen:
+            seen.add(s["text"])
+            unique.append(s)
+    return unique[:limit]
+
+
+# --- REBUILD LOGIC ---
 
 def rebuild_index() -> Dict[str, Any]:
-    """Rebuild all indices from JSON files"""
+    """
+    Rebuild indices with Reverse Mapping Strategy.
+    1. Reset Indices
+    2. Load Persons First -> Map them to Companies (In Memory)
+    3. Load Companies Second -> Inject Person IDs from Map
+    """
     stats = {
         "companies_indexed": 0,
         "persons_indexed": 0,
-        "notes_indexed": 0,
-        "documents_indexed": 0,
         "errors": []
     }
     
     try:
-        # Recreate all indices
+        # 1. Reset Indices (Delete & Recreate)
         for index_name in ALL_INDICES:
             if es.indices.exists(index=index_name):
                 es.indices.delete(index=index_name)
-            if not create_index(index_name):
-                stats["errors"].append(f"Failed to create index {index_name}")
+            create_index(index_name) # Uses new mapping for companies
         
-        # Index companies from JSON file
-        try:
-            from company_loader import load_companies
-            companies = load_companies()
-            for company in companies:
-                if index_company_card(company):
-                    stats["companies_indexed"] += 1
-        except Exception as e:
-            stats["errors"].append(f"Failed to index companies: {e}")
+        # 2. LOAD PERSONS FIRST (To build the map)
+        company_roster = {} # Map: "Company Name" -> ["person_id_1", "person_id_2"]
         
-        # Index persons from JSON file
         try:
             from profile_loader import load_profiles, get_recent_education, get_company_info
             profiles = load_profiles()
+            
             for profile in profiles:
+                # Extract Data
                 profile_data = profile.get("profile_data", {})
                 name = profile_data.get("name", "Unknown")
-                if not name or name == "Unknown":
-                    continue
-                
                 linkedin_id = profile.get("linkedin_username", "")
-                if not linkedin_id:
+                
+                if not name or name == "Unknown" or not linkedin_id:
                     continue
                 
+                # Generate ID (Must match what we store)
                 person_id = f"person_{linkedin_id}"
-                company, designation = get_company_info(profile)
-                linkedin_url = profile.get("linkedin_url", f"https://linkedin.com/in/{linkedin_id}")
-                education = get_recent_education(profile)
-                experience_years = profile.get("total_experience_years")
-                location = profile_data.get("location")
                 
+                # Get Company Info
+                company_name, designation = get_company_info(profile)
+                
+                # --- BUILD THE MAP (Key Step) ---
+                if company_name:
+                    # Clean company name to match (strip spaces, lowercase optionally if fuzzy needed)
+                    # For now, strict string match
+                    clean_c_name = company_name.strip()
+                    if clean_c_name not in company_roster:
+                        company_roster[clean_c_name] = []
+                    company_roster[clean_c_name].append(person_id)
+                
+                # Prepare Person Data
                 person_data = {
                     "id": person_id,
                     "name": name,
                     "designation": designation,
-                    "company": company,
+                    "company": company_name,
                     "linkedin_id": linkedin_id,
-                    "linkedin_url": linkedin_url,
-                    "education": education,
-                    "experience_years": experience_years,
-                    "location": location
+                    "linkedin_url": profile.get("linkedin_url", ""),
+                    "education": get_recent_education(profile),
+                    "experience_years": profile.get("total_experience_years"),
+                    "location": profile_data.get("location")
                 }
+                
+                # Index Person
                 if index_person_card(person_data):
                     stats["persons_indexed"] += 1
+                    
         except Exception as e:
             stats["errors"].append(f"Failed to index persons: {e}")
-        
-        # Note: Notes are indexed when saved, not during rebuild
-        # Documents are indexed when uploaded, not during rebuild
-        
-        logger.info(f"Index rebuild complete: {stats['companies_indexed']} companies, "
-                   f"{stats['persons_indexed']} persons indexed")
+            logger.error(f"Person load error: {e}")
+
+        # 3. LOAD COMPANIES SECOND (Inject the map)
+        try:
+            from company_loader import load_companies
+            companies = load_companies()
+            
+            for company in companies:
+                c_name = company.get("name", "").strip()
+                
+                # --- INJECT MAPPED IDS ---
+                # Check if we found people for this company in step 2
+                associated_people = company_roster.get(c_name, [])
+                company["mapped_person_ids"] = associated_people
+                
+                if associated_people:
+                    logger.info(f"Mapped {len(associated_people)} people to {c_name} (IDs: {associated_people})")
+
+                # Index Company
+                if index_company_card(company):
+                    stats["companies_indexed"] += 1
+                    
+        except Exception as e:
+            stats["errors"].append(f"Failed to index companies: {e}")
+            logger.error(f"Company load error: {e}")
+            
+        logger.info(f"Rebuild Complete: {stats}")
         
     except Exception as e:
         stats["errors"].append(f"Rebuild failed: {e}")
         logger.error(f"Index rebuild failed: {e}")
     
     return stats
-
-
-
-
-# For auto Suggestions...
-
-# ... (Keep previous imports and code) ...
-
-def get_auto_complete_suggestions(query_text: str, limit: int = 5) -> List[Dict[str, str]]:
-    """
-    Fast prefix search for auto-complete dropdowns.
-    Updated: Now includes NOTES and uses better field targeting.
-    """
-    if not query_text:
-        return []
-
-    suggestions = []
-    
-    search_body = {
-        "query": {
-            "multi_match": {
-                "query": query_text,
-                "type": "bool_prefix", 
-                "fields": [
-                    "title",                        
-                    "metadata.name",                
-                    "metadata.designation",         
-                    "metadata.location",            
-                    "metadata.industry",            
-                    "metadata.education",           
-                    "metadata.company",
-                    "content" # Added content for Notes/Docs prefix search
-                ]
-            }
-        },
-        "size": limit,
-        "_source": ["title", "card_type", "metadata", "id", "content"] 
-    }
-
-    # ADDED: INDEX_NOTES to the list
-    target_indices = [INDEX_PERSONS, INDEX_COMPANIES, INDEX_DOCUMENTS, INDEX_NOTES]
-    
-    for index in target_indices:
-        try:
-            if es.indices.exists(index=index):
-                res = es.search(index=index, body=search_body)
-                
-                for hit in res["hits"]["hits"]:
-                    src = hit["_source"]
-                    meta = src.get("metadata", {})
-                    
-                    # 1. Determine Display Text
-                    text = src.get("title") or meta.get("name")
-                    
-                    # 2. Determine Type & Context Hint
-                    type_ = "unknown"
-                    sub_text = ""
-                    
-                    if index == INDEX_COMPANIES: 
-                        type_ = "Company"
-                        if meta.get("location"): sub_text = meta.get("location")
-                        elif meta.get("industry"): sub_text = meta.get("industry")
-                        
-                    elif index == INDEX_PERSONS: 
-                        type_ = "Person"
-                        if meta.get("designation"): sub_text = meta.get("designation")
-                        elif meta.get("location"): sub_text = meta.get("location")
-                        
-                    elif index == INDEX_DOCUMENTS: 
-                        type_ = "Document"
-                        # Use original filename if available, otherwise use stored filename from title
-                        original_filename = meta.get("original_filename")
-                        if original_filename:
-                            text = original_filename
-                        else:
-                            # Extract original filename from title if it contains stored filename
-                            title = src.get("title", "")
-                            # Title format: "{stored_filename} (chunk X)" - we want just the filename part
-                            if " (chunk" in title:
-                                stored_fn = title.split(" (chunk")[0]
-                                text = stored_fn  # Fallback to stored if no original
-                        # sub_text = "File" 
-                        
-                    elif index == INDEX_NOTES:
-                        type_ = "Note"
-                        # For notes, show who it's attached to
-                        if meta.get("person_name"): sub_text = f"on {meta['person_name']}"
-                        elif meta.get("company_name"): sub_text = f"on {meta['company_name']}"
-
-                    if text:
-                        # Format: "Name (Extra Info)"
-                        display_text = f"{text} ({sub_text})" if sub_text else text
-                        
-                        suggestions.append({
-                            "text": display_text,
-                            "type": type_,
-                            "id": src.get("id")
-                        })
-        except Exception as e:
-            logger.warning(f"Suggestion error on {index}: {e}")
-
-    # 3. Deduplicate
-    seen = set()
-    unique_suggestions = []
-    for s in suggestions:
-        if s["text"] not in seen:
-            seen.add(s["text"])
-            unique_suggestions.append(s)
-            
-    return unique_suggestions[:limit]
